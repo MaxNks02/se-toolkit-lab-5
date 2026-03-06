@@ -61,7 +61,7 @@ async def get_timeline(
 
     TODO: Implement this endpoint.
     - Find the lab item and its child task items
-    - Group interactions by date (created_at::date)
+    - Group interactions by date (use func.date(created_at))
     - Count the number of submissions per day
     - Return a JSON array:
       [{"date": "2026-02-28", "submissions": 45}, ...]
