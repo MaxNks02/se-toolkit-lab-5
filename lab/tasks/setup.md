@@ -253,7 +253,7 @@ If you can't [connect to your VM](../../wiki/vm.md#connect-to-the-vm), complete 
 
 #### 1.11.1. (UPD) Set up the `Docker` environment
 
-1. To copy the [`.env.docker.example`](../../.env.docker.example) file to the [`.env.docker.secret`](../../wiki/dotenv-docker-secret.md#what-is-envdockersecret) file,
+1. To copy the [`.env.docker.example`](../../.env.docker.secret) file to the [`.env.docker.secret`](../../wiki/dotenv-docker-secret.md#what-is-envdockersecret) file,
 
    [run in the `VS Code Terminal`](../../wiki/vs-code.md#run-a-command-in-the-vs-code-terminal):
 
