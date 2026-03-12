@@ -1,14 +1,18 @@
 import { useState, useEffect, useReducer, FormEvent } from 'react'
 import './App.css'
+import Dashboard from './Dashboard';
 
 const STORAGE_KEY = 'api_key'
 
+// Types for Items
 interface Item {
   id: number
   type: string
   title: string
   created_at: string
 }
+
+type Page = 'items' | 'dashboard'
 
 type FetchState =
   | { status: 'idle' }
@@ -29,6 +33,8 @@ function fetchReducer(_state: FetchState, action: FetchAction): FetchState {
       return { status: 'success', items: action.data }
     case 'fetch_error':
       return { status: 'error', message: action.message }
+    default:
+      return _state
   }
 }
 
@@ -37,14 +43,15 @@ function App() {
     () => localStorage.getItem(STORAGE_KEY) ?? '',
   )
   const [draft, setDraft] = useState('')
+  const [currentPage, setCurrentPage] = useState<Page>('items') // Navigation state
   const [fetchState, dispatch] = useReducer(fetchReducer, { status: 'idle' })
 
   useEffect(() => {
-    if (!token) return
+    if (!token || currentPage !== 'items') return
 
     dispatch({ type: 'fetch_start' })
 
-    fetch('/items/', {
+    fetch('/api/items/', { // Ensure this matches your Vite proxy or full URL
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((res) => {
@@ -55,7 +62,7 @@ function App() {
       .catch((err: Error) =>
         dispatch({ type: 'fetch_error', message: err.message }),
       )
-  }, [token])
+  }, [token, currentPage])
 
   function handleConnect(e: FormEvent) {
     e.preventDefault()
@@ -69,6 +76,7 @@ function App() {
     localStorage.removeItem(STORAGE_KEY)
     setToken('')
     setDraft('')
+    setCurrentPage('items')
   }
 
   if (!token) {
@@ -88,39 +96,65 @@ function App() {
   }
 
   return (
-    <div>
+    <div className="app-container">
       <header className="app-header">
-        <h1>Items</h1>
+        <nav className="nav-menu">
+          {/* Page Toggles */}
+          <button
+            className={`nav-link ${currentPage === 'items' ? 'active' : ''}`}
+            onClick={() => setCurrentPage('items')}
+          >
+            Items
+          </button>
+          <button
+            className={`nav-link ${currentPage === 'dashboard' ? 'active' : ''}`}
+            onClick={() => setCurrentPage('dashboard')}
+          >
+            Dashboard
+          </button>
+        </nav>
         <button className="btn-disconnect" onClick={handleDisconnect}>
           Disconnect
         </button>
       </header>
 
-      {fetchState.status === 'loading' && <p>Loading...</p>}
-      {fetchState.status === 'error' && <p>Error: {fetchState.message}</p>}
+      <main className="app-content">
+        {/* Conditional Rendering based on currentPage */}
+        {currentPage === 'dashboard' ? (
+          <Dashboard />
+        ) : (
+          <>
+            <h1>Items List</h1>
+            {fetchState.status === 'loading' && <p>Loading items...</p>}
+            {fetchState.status === 'error' && <p className="error">Error: {fetchState.message}</p>}
 
-      {fetchState.status === 'success' && (
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>ItemType</th>
-              <th>Title</th>
-              <th>Created at</th>
-            </tr>
-          </thead>
-          <tbody>
-            {fetchState.items.map((item) => (
-              <tr key={item.id}>
-                <td>{item.id}</td>
-                <td>{item.type}</td>
-                <td>{item.title}</td>
-                <td>{item.created_at}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+            {fetchState.status === 'success' && (
+              <div className="table-container">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Type</th>
+                      <th>Title</th>
+                      <th>Created At</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fetchState.items.map((item) => (
+                      <tr key={item.id}>
+                        <td>{item.id}</td>
+                        <td><span className={`badge ${item.type}`}>{item.type}</span></td>
+                        <td>{item.title}</td>
+                        <td>{new Date(item.created_at).toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </main>
     </div>
   )
 }

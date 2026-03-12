@@ -1,147 +1,178 @@
-"""ETL pipeline: fetch data from the autochecker API and load it into the database.
-
-The autochecker dashboard API provides two endpoints:
-- GET /api/items — lab/task catalog
-- GET /api/logs  — anonymized check results (supports ?since= and ?limit= params)
-
-Both require HTTP Basic Auth (email + password from settings).
-"""
-
+import httpx
 from datetime import datetime
-
+from sqlalchemy import select, func
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.settings import settings
+from app.models.item import ItemRecord
+from app.models.learner import Learner
+from app.models.interaction import InteractionLog
 
 
 # ---------------------------------------------------------------------------
 # Extract — fetch data from the autochecker API
 # ---------------------------------------------------------------------------
 
-
 async def fetch_items() -> list[dict]:
-    """Fetch the lab/task catalog from the autochecker API.
-
-    TODO: Implement this function.
-    - Use httpx.AsyncClient to GET {settings.autochecker_api_url}/api/items
-    - Pass HTTP Basic Auth using settings.autochecker_email and
-      settings.autochecker_password
-    - The response is a JSON array of objects with keys:
-      lab (str), task (str | null), title (str), type ("lab" | "task")
-    - Return the parsed list of dicts
-    - Raise an exception if the response status is not 200
-    """
-    raise NotImplementedError
+    """Fetch the lab/task catalog from the autochecker API."""
+    auth = (settings.autochecker_email, settings.autochecker_password)
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{settings.autochecker_api_url}/api/items", auth=auth)
+        if response.status_code != 200:
+            raise Exception(f"Failed to fetch items: {response.status_code}")
+        return response.json()
 
 
 async def fetch_logs(since: datetime | None = None) -> list[dict]:
-    """Fetch check results from the autochecker API.
+    """Fetch check results from the autochecker API with pagination."""
+    auth = (settings.autochecker_email, settings.autochecker_password)
+    all_logs = []
+    has_more = True
+    current_since = since.isoformat() if since else None
 
-    TODO: Implement this function.
-    - Use httpx.AsyncClient to GET {settings.autochecker_api_url}/api/logs
-    - Pass HTTP Basic Auth using settings.autochecker_email and
-      settings.autochecker_password
-    - Query parameters:
-      - limit=500 (fetch in batches)
-      - since={iso timestamp} if provided (for incremental sync)
-    - The response JSON has shape:
-      {"logs": [...], "count": int, "has_more": bool}
-    - Handle pagination: keep fetching while has_more is True
-      - Use the submitted_at of the last log as the new "since" value
-    - Return the combined list of all log dicts from all pages
-    """
-    raise NotImplementedError
+    async with httpx.AsyncClient() as client:
+        while has_more:
+            params = {"limit": 500}
+            if current_since:
+                params["since"] = current_since
+
+            response = await client.get(f"{settings.autochecker_api_url}/api/logs", auth=auth, params=params)
+            data = response.json()
+
+            logs = data.get("logs", [])
+            all_logs.extend(logs)
+            has_more = data.get("has_more", False)
+
+            if has_more and logs:
+                current_since = logs[-1]["submitted_at"]
+
+    return all_logs
 
 
 # ---------------------------------------------------------------------------
 # Load — insert fetched data into the local database
 # ---------------------------------------------------------------------------
 
-
 async def load_items(items: list[dict], session: AsyncSession) -> int:
-    """Load items (labs and tasks) into the database.
+    """Load items (labs and tasks) into the database."""
+    new_count = 0
+    lab_map = {}  # Maps lab short ID (e.g. "lab-01") to DB record
 
-    TODO: Implement this function.
-    - Import ItemRecord from app.models.item
-    - Process labs first (items where type="lab"):
-      - For each lab, check if an item with type="lab" and matching title
-        already exists (SELECT)
-      - If not, INSERT a new ItemRecord(type="lab", title=lab_title)
-      - Build a dict mapping the lab's short ID (the "lab" field, e.g.
-        "lab-01") to the lab's database record, so you can look up
-        parent IDs when processing tasks
-    - Then process tasks (items where type="task"):
-      - Find the parent lab item using the task's "lab" field (e.g.
-        "lab-01") as the key into the dict you built above
-      - Check if a task with this title and parent_id already exists
-      - If not, INSERT a new ItemRecord(type="task", title=task_title,
-        parent_id=lab_item.id)
-    - Commit after all inserts
-    - Return the number of newly created items
-    """
-    raise NotImplementedError
+    # Process labs first
+    for item in [i for i in items if i["type"] == "lab"]:
+        statement = select(ItemRecord).where(ItemRecord.type == "lab", ItemRecord.title == item["title"])
+        # FIXED: Added .scalars() to return the object, not a tuple
+        existing = (await session.exec(statement)).scalars().first()
+
+        if not existing:
+            existing = ItemRecord(type="lab", title=item["title"])
+            session.add(existing)
+            new_count += 1
+            await session.flush()  # Get ID for the lab record
+
+        lab_map[item["lab"]] = existing
+
+    # Process tasks
+    for item in [i for i in items if i["type"] == "task"]:
+        parent_lab = lab_map.get(item["lab"])
+        if not parent_lab:
+            continue
+
+        statement = select(ItemRecord).where(
+            ItemRecord.title == item["title"],
+            ItemRecord.parent_id == parent_lab.id
+        )
+        # FIXED: Added .scalars() to ensure .id access works
+        existing = (await session.exec(statement)).scalars().first()
+
+        if not existing:
+            session.add(ItemRecord(type="task", title=item["title"], parent_id=parent_lab.id))
+            new_count += 1
+
+    await session.commit()
+    return new_count
 
 
-async def load_logs(
-    logs: list[dict], items_catalog: list[dict], session: AsyncSession
-) -> int:
-    """Load interaction logs into the database.
+async def load_logs(logs: list[dict], items_catalog: list[dict], session: AsyncSession) -> int:
+    """Load interaction logs into the database with idempotency."""
+    new_interactions = 0
 
-    Args:
-        logs: Raw log dicts from the API (each has lab, task, student_id, etc.)
-        items_catalog: Raw item dicts from fetch_items() — needed to map
-            short IDs (e.g. "lab-01", "setup") to item titles stored in the DB.
-        session: Database session.
+    # FIXED: Use .scalars().all() to get actual ItemRecord objects
+    item_statement = select(ItemRecord)
+    db_items = (await session.exec(item_statement)).scalars().all()
 
-    TODO: Implement this function.
-    - Import Learner from app.models.learner
-    - Import InteractionLog from app.models.interaction
-    - Import ItemRecord from app.models.item
-    - Build a lookup from (lab_short_id, task_short_id) to item title
-      using items_catalog. For labs, the key is (lab, None). For tasks,
-      the key is (lab, task). The value is the item's title.
-    - For each log dict:
-      1. Find or create a Learner by external_id (log["student_id"])
-         - If creating, set student_group from log["group"]
-      2. Find the matching item in the database:
-         - Use the lookup to get the title for (log["lab"], log["task"])
-         - Query the DB for an ItemRecord with that title
-         - Skip this log if no matching item is found
-      3. Check if an InteractionLog with this external_id already exists
-         (for idempotent upsert — skip if it does)
-      4. Create InteractionLog with:
-         - external_id = log["id"]
-         - learner_id = learner.id
-         - item_id = item.id
-         - kind = "attempt"
-         - score = log["score"]
-         - checks_passed = log["passed"]
-         - checks_total = log["total"]
-         - created_at = parsed log["submitted_at"]
-    - Commit after all inserts
-    - Return the number of newly created interactions
-    """
-    raise NotImplementedError
+    catalog_map = {(i["lab"], i["task"]): i["title"] for i in items_catalog}
+    db_lookup = {}
+
+    # Map lab slug (from API) to lab ID (from DB)
+    lab_slug_to_id = {
+        i["lab"]: db_item.id for i in items_catalog for db_item in db_items
+        if i["type"] == "lab" and i["title"] == db_item.title
+    }
+
+    for db_item in db_items:
+        if db_item.type == "task":
+            for (l_slug, t_slug), title in catalog_map.items():
+                if title == db_item.title and db_item.parent_id == lab_slug_to_id.get(l_slug):
+                    db_lookup[(l_slug, t_slug)] = db_item.id
+
+    for log in logs:
+        # Find or create Learner
+        statement = select(Learner).where(Learner.external_id == log["student_id"])
+        # FIXED: Added .scalars()
+        learner = (await session.exec(statement)).scalars().first()
+        if not learner:
+            learner = Learner(external_id=log["student_id"], student_group=log["group"])
+            session.add(learner)
+            await session.flush()
+
+        # Find Item ID
+        item_id = db_lookup.get((log["lab"], log["task"]))
+        if not item_id:
+            continue
+
+        # Idempotent check
+        # FIXED: Added .scalars() to ensure it doesn't return a tuple
+        existing_log = (await session.exec(
+            select(InteractionLog).where(InteractionLog.external_id == log["id"])
+        )).scalars().first()
+        if existing_log:
+            continue
+
+        session.add(InteractionLog(
+            external_id=log["id"],
+            learner_id=learner.id,
+            item_id=item_id,
+            kind="attempt",
+            score=log["score"],
+            checks_passed=log["passed"],
+            checks_total=log["total"],
+            created_at=datetime.fromisoformat(log["submitted_at"].replace("Z", "+00:00"))
+        ))
+        new_interactions += 1
+
+    await session.commit()
+    return new_interactions
 
 
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
-
 async def sync(session: AsyncSession) -> dict:
-    """Run the full ETL pipeline.
+    """Run the full ETL pipeline."""
+    raw_items = await fetch_items()
+    await load_items(raw_items, session)
 
-    TODO: Implement this function.
-    - Step 1: Fetch items from the API (keep the raw list) and load them
-      into the database
-    - Step 2: Determine the last synced timestamp
-      - Query the most recent created_at from InteractionLog
-      - If no records exist, since=None (fetch everything)
-    - Step 3: Fetch logs since that timestamp and load them
-      - Pass the raw items list to load_logs so it can map short IDs
-        to titles
-    - Return a dict: {"new_records": <number of new interactions>,
-                      "total_records": <total interactions in DB>}
-    """
-    raise NotImplementedError
+    last_interaction_stmt = select(InteractionLog).order_by(InteractionLog.created_at.desc())
+    last_interaction = (await session.exec(last_interaction_stmt)).scalars().first()
+    since = last_interaction.created_at if last_interaction else None
+
+    raw_logs = await fetch_logs(since=since)
+    new_count = await load_logs(raw_logs, raw_items, session)
+
+    # CHANGE THIS LINE:
+    # Use .scalar() instead of .one() to get the raw integer value
+    total_count = await session.scalar(select(func.count(InteractionLog.id)))
+
+    return {"new_records": new_count, "total_records": total_count}
